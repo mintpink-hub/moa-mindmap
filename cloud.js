@@ -1,16 +1,292 @@
+
 (()=>{'use strict';
-const cfg=window.MOA_CONFIG||{};const $=id=>document.getElementById(id);
-let client,user,remoteVersion=null,timer=null,saving=false,pending=null,poll=null;
-const key='moa-mindmap-v3-collection';
-function message(s){$('cloudMessage').textContent=s;$('cloudStatus').textContent=s}
-function gate(show){$('cloudGate').hidden=!show;document.body.classList.toggle('cloud-locked',show)}
-function valid(){return cfg.supabaseUrl?.startsWith('https://')&&cfg.supabasePublishableKey&&!cfg.supabasePublishableKey.includes('PASTE_')&&cfg.allowedEmail?.includes('@')&&!cfg.allowedEmail.includes('PASTE_')}
-function local(){try{return JSON.parse(localStorage.getItem(key))}catch{return null}}
-async function fetchCloud(){const {data,error}=await client.from('mindmaps').select('content,updated_at').eq('user_id',user.id).maybeSingle();if(error)throw error;return data}
-async function applyCloud(){const row=await fetchCloud();if(row?.content?.maps?.length){remoteVersion=row.updated_at;window.moaApplyCloudCollection(row.content);message('✓ 클라우드에서 불러옴');$('cloudImport').hidden=false;gate(false)}else{message('클라우드가 비어 있어요. 이 기기의 기존 마인드맵을 가져올 수 있어요.');$('cloudImport').hidden=false;gate(true)}}
-async function saveNow(){if(!user||!pending||saving)return;saving=true;const payload=pending;pending=null;try{const {data,error}=await client.from('mindmaps').upsert({user_id:user.id,content:payload,updated_at:new Date().toISOString()},{onConflict:'user_id'}).select('updated_at').single();if(error)throw error;remoteVersion=data.updated_at;message('✓ 클라우드 저장됨')}catch(e){pending=payload;message('저장 실패: '+e.message)}finally{saving=false;if(pending)timer=setTimeout(saveNow,2500)}}
-window.MoaCloud={schedule(content){if(!user)return;pending=structuredClone(content);message('클라우드 저장 중…');clearTimeout(timer);timer=setTimeout(saveNow,850)}};
-async function init(){if(!valid()){message('cloud-config.js에 Supabase Publishable 키와 본인 Google 이메일을 입력해 주세요.');$('cloudRetry').hidden=false;return}if(!window.supabase){message('Supabase 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.');$('cloudRetry').hidden=false;return}client=window.supabase.createClient(cfg.supabaseUrl,cfg.supabasePublishableKey,{auth:{detectSessionInUrl:true}});const {data:{session},error}=await client.auth.getSession();if(error){message(error.message);return}if(session)await signedIn(session.user);else{message('Google 계정으로 로그인해 주세요.');$('cloudLogin').hidden=false}client.auth.onAuthStateChange((_event,session)=>{if(session?.user&&!user)setTimeout(()=>signedIn(session.user),0);else if(!session?.user&&user){user=null;gate(true);$('cloudLogin').hidden=false;message('로그아웃되었습니다.')}})}
-async function signedIn(u){if(u.email?.toLowerCase()!==cfg.allowedEmail.toLowerCase()){await client.auth.signOut();message('허용된 개인 Google 계정이 아닙니다.');$('cloudLogin').hidden=false;return}user=u;$('cloudLogin').hidden=true;$('cloudLogout').hidden=false;try{await applyCloud()}catch(e){message('클라우드 연결 오류: '+e.message);$('cloudRetry').hidden=false}if(!poll)poll=setInterval(async()=>{if(!user||pending||saving||!$('cloudGate').hidden)return;try{const row=await fetchCloud();if(row?.updated_at&&row.updated_at!==remoteVersion){remoteVersion=row.updated_at;window.moaApplyCloudCollection(row.content);message('✓ 다른 기기의 변경사항 반영')}}catch{}},12000)}
-window.addEventListener('DOMContentLoaded',()=>{$('cloudLogin').onclick=async()=>{if(!client)return;const {error}=await client.auth.signInWithOAuth({provider:'google',options:{redirectTo:location.origin+location.pathname}});if(error)message(error.message)};$('cloudLogout').onclick=()=>client?.auth.signOut();$('cloudImport').onclick=async()=>{const c=local();if(!c?.maps?.length){message('이 기기에 가져올 마인드맵이 없어요.');return}if(!confirm('이 기기의 마인드맵을 클라우드에 업로드할까요? 기존 클라우드 데이터가 있다면 덮어씁니다.'))return;pending=structuredClone(c);await saveNow();if(!pending){window.moaApplyCloudCollection(c);gate(false)}};$('cloudRetry').onclick=()=>location.reload();init()});
+
+const cfg = window.MOA_CONFIG || {};
+const $ = id => document.getElementById(id);
+
+let client, user;
+let remoteVersion = null;
+let timer = null;
+let saving = false;
+let pending = null;
+let poll = null;
+
+const key = 'moa-mindmap-v3-collection';
+
+function message(s) {
+  $('cloudMessage').textContent = s;
+  $('cloudStatus').textContent = s;
+}
+
+function gate(show) {
+  $('cloudGate').hidden = !show;
+  document.body.classList.toggle('cloud-locked', show);
+}
+
+function valid() {
+  return cfg.supabaseUrl?.startsWith('https://') &&
+    cfg.supabasePublishableKey &&
+    !cfg.supabasePublishableKey.includes('PASTE_') &&
+    cfg.allowedEmail?.includes('@') &&
+    !cfg.allowedEmail.includes('PASTE_');
+}
+
+function local() {
+  try {
+    return JSON.parse(localStorage.getItem(key));
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCloud() {
+  const {data, error} = await client
+    .from('mindmaps')
+    .select('content,updated_at')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
+async function applyCloud() {
+  const row = await fetchCloud();
+
+  if (row?.content?.maps?.length) {
+    remoteVersion = row.updated_at;
+    window.moaApplyCloudCollection(row.content);
+    message('✓ 클라우드에서 불러옴');
+    $('cloudImport').hidden = false;
+    gate(false);
+  } else {
+    const existing = local();
+
+    if (existing?.maps?.length) {
+      message('클라우드가 비어 있어요. 기존 마인드맵을 가져오거나 새로 시작할 수 있어요.');
+      $('cloudImport').hidden = false;
+    } else {
+      message('첫 마인드맵을 시작할 수 있어요.');
+      $('cloudImport').hidden = true;
+    }
+
+    $('cloudNew').hidden = false;
+    gate(true);
+  }
+}
+
+async function saveNow() {
+  if (!user || !pending || saving) return;
+
+  saving = true;
+  const payload = pending;
+  pending = null;
+
+  try {
+    const {data, error} = await client
+      .from('mindmaps')
+      .upsert({
+        user_id: user.id,
+        content: payload,
+        updated_at: new Date().toISOString()
+      }, {onConflict: 'user_id'})
+      .select('updated_at')
+      .single();
+
+    if (error) throw error;
+
+    remoteVersion = data.updated_at;
+    message('✓ 클라우드 저장됨');
+  } catch (e) {
+    pending = payload;
+    message('저장 실패: ' + e.message);
+  } finally {
+    saving = false;
+
+    if (pending) {
+      timer = setTimeout(saveNow, 2500);
+    }
+  }
+}
+
+window.MoaCloud = {
+  schedule(content) {
+    if (!user) return;
+
+    pending = structuredClone(content);
+    message('클라우드 저장 중…');
+
+    clearTimeout(timer);
+    timer = setTimeout(saveNow, 850);
+  }
+};
+
+async function init() {
+  if (!valid()) {
+    message('cloud-config.js에 Supabase Publishable 키와 본인 Google 이메일을 입력해 주세요.');
+    $('cloudRetry').hidden = false;
+    return;
+  }
+
+  if (!window.supabase) {
+    message('Supabase 라이브러리를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.');
+    $('cloudRetry').hidden = false;
+    return;
+  }
+
+  client = window.supabase.createClient(
+    cfg.supabaseUrl,
+    cfg.supabasePublishableKey,
+    {auth: {detectSessionInUrl: true}}
+  );
+
+  const {data: {session}, error} = await client.auth.getSession();
+
+  if (error) {
+    message(error.message);
+    return;
+  }
+
+  if (session) {
+    await signedIn(session.user);
+  } else {
+    message('Google 계정으로 로그인해 주세요.');
+    $('cloudLogin').hidden = false;
+  }
+
+  client.auth.onAuthStateChange((_event, session) => {
+    if (session?.user && !user) {
+      setTimeout(() => signedIn(session.user), 0);
+    } else if (!session?.user && user) {
+      user = null;
+      gate(true);
+      $('cloudLogin').hidden = false;
+      message('로그아웃되었습니다.');
+    }
+  });
+}
+
+async function signedIn(u) {
+  if (u.email?.toLowerCase() !== cfg.allowedEmail.toLowerCase()) {
+    await client.auth.signOut();
+    message('허용된 개인 Google 계정이 아닙니다.');
+    $('cloudLogin').hidden = false;
+    return;
+  }
+
+  user = u;
+  $('cloudLogin').hidden = true;
+  $('cloudLogout').hidden = false;
+
+  try {
+    await applyCloud();
+  } catch (e) {
+    message('클라우드 연결 오류: ' + e.message);
+    $('cloudRetry').hidden = false;
+  }
+
+  if (!poll) {
+    poll = setInterval(async () => {
+      if (!user || pending || saving || !$('cloudGate').hidden) return;
+
+      try {
+        const row = await fetchCloud();
+
+        if (row?.updated_at && row.updated_at !== remoteVersion) {
+          remoteVersion = row.updated_at;
+          window.moaApplyCloudCollection(row.content);
+          message('✓ 다른 기기의 변경사항 반영');
+        }
+      } catch {}
+    }, 12000);
+  }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  const newButton = document.createElement('button');
+
+  newButton.id = 'cloudNew';
+  newButton.textContent = '새 마인드맵 시작하기';
+  newButton.hidden = true;
+
+  $('cloudImport').insertAdjacentElement('afterend', newButton);
+
+  newButton.onclick = async () => {
+    if (!user) return;
+
+    const c = {
+      active: 'map1',
+      maps: [{
+        id: 'map1',
+        data: {
+          title: '나의 마인드맵',
+          nodes: [{
+            id: 'root',
+            text: '나의 목표',
+            x: 0,
+            y: 0,
+            color: 0
+          }],
+          edges: []
+        }
+      }]
+    };
+
+    newButton.disabled = true;
+    pending = structuredClone(c);
+
+    await saveNow();
+
+    if (!pending) {
+      window.moaApplyCloudCollection(c);
+      $('cloudImport').hidden = false;
+      newButton.hidden = true;
+      gate(false);
+    } else {
+      newButton.disabled = false;
+      message('새 마인드맵 저장에 실패했어요. 다시 시도해 주세요.');
+    }
+  };
+
+  $('cloudLogin').onclick = async () => {
+    if (!client) return;
+
+    const {error} = await client.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: location.origin + location.pathname
+      }
+    });
+
+    if (error) message(error.message);
+  };
+
+  $('cloudLogout').onclick = () => client?.auth.signOut();
+
+  $('cloudImport').onclick = async () => {
+    const c = local();
+
+    if (!c?.maps?.length) {
+      message('이 기기에 가져올 마인드맵이 없어요.');
+      return;
+    }
+
+    if (!confirm('이 기기의 마인드맵을 클라우드에 업로드할까요? 기존 클라우드 데이터가 있다면 덮어씁니다.')) {
+      return;
+    }
+
+    pending = structuredClone(c);
+    await saveNow();
+
+    if (!pending) {
+      window.moaApplyCloudCollection(c);
+      gate(false);
+    }
+  };
+
+  $('cloudRetry').onclick = () => location.reload();
+
+  init();
+});
+
 })();
